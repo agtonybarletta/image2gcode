@@ -1,0 +1,13 @@
+# Build artifacts (CMake / g++)
+build/
+image2gcodeCpp/a.out
+image2gcodeCpp/CMakeCache.txt
+image2gcodeCpp/CMakeFiles/
+image2gcodeCpp/cmake_install.cmake
+image2gcodeCpp/Makefile
+image2gcodeCpp/image2gcodeOpenvcCpp
+
+# Sample / output files
+*.gcode
+preview.png
+dithered.png
