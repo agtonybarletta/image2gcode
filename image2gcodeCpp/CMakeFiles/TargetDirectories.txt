@@ -1,3 +1,0 @@
-/home/tony/projects/image2gcode/image2gcodeCpp/CMakeFiles/rebuild_cache.dir
-/home/tony/projects/image2gcode/image2gcodeCpp/CMakeFiles/edit_cache.dir
-/home/tony/projects/image2gcode/image2gcodeCpp/CMakeFiles/image2gcodeOpenvcCpp.dir

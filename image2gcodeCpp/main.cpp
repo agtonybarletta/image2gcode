@@ -2,444 +2,202 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 #include <opencv2/highgui.hpp>
-#include <iostream>
+
+#include <algorithm>
 #include <fstream>
-#include <iomanip> 
+#include <iomanip>
+#include <iostream>
+#include <string>
+
 using namespace cv;
-void dithering(Mat* src, Mat* dst);
-void printM(Mat tmp);
-double bound(double x, double from, double to);
-int main( int argc, char* argv[])
-{
-	// parse command line
-    std::string image_path = samples::findFile((std::string)argv[argc-1]);
-	auto itr = std::find(argv, argv+argc, std::string("--beamWidth"));
-	double beamWidth = 0.0f;
-	beamWidth = itr != argv+argc && ++itr != argv+argc ? std::stod(std::string(*itr)): 0.0;
-	std::cout << "-- beamWidth "<< beamWidth <<std::endl;
 
-	double x0 = 0.0f;
-	itr = std::find(argv, argv+argc, std::string("--x0"));
-	x0 = itr != argv+argc && ++itr != argv+argc ? std::stod(std::string(*itr)): 0.0;
-	std::cout << "-- x0 "<< x0 <<std::endl;
+namespace {
 
-	double y0 = 0.0f;
-	itr = std::find(argv, argv+argc, std::string("--y0"));
-	y0 = itr != argv+argc && ++itr != argv+argc ? std::stod(std::string(*itr)): 0.0;
-	std::cout << "-- y0 "<< y0 <<std::endl;
+double bound(double x, double from, double to) {
+    return x < from ? from : (x > to ? to : x);
+}
 
-	double wf = 0.0f;
-	itr = std::find(argv, argv+argc, std::string("--wf"));
-	wf = itr != argv+argc && ++itr != argv+argc ? std::stod(std::string(*itr)): 0.0;
-	std::cout << "-- wf "<< wf <<std::endl;
+void dithering(Mat& src, Mat& dst) {
+    // Floyd–Steinberg error-diffusion weights.
+    constexpr double kErrorEast = 7.0 / 16.0;
+    constexpr double kErrorSouthWest = 3.0 / 16.0;
+    constexpr double kErrorSouth = 5.0 / 16.0;
+    constexpr double kErrorSouthEast = 1.0 / 16.0;
 
-	double hf = 0.0f;
-	itr = std::find(argv, argv+argc, std::string("--hf"));
-	hf = itr != argv+argc && ++itr != argv+argc ? std::stod(std::string(*itr)): 0.0;
-	std::cout << "-- hf "<< hf <<std::endl;
+    for (int i = 1; i < dst.cols - 1; i++) {
+        for (int j = 1; j < dst.rows - 1; j++) {
+            const double old_pixel = dst.at<double>(j, i);
+            const double new_pixel = old_pixel > 0.5 ? 1 : 0;  // int on purpose (original semantics)
+            const double error = old_pixel - new_pixel;
 
-	std::string output_file_img = std::string("");
-	itr = std::find(argv, argv+argc, std::string("--output_file_img"));
-	output_file_img = itr != argv+argc && ++itr != argv+argc ? std::string(*itr): "";
-	std::cout << "-- output_file_img "<< output_file_img <<std::endl;
+            dst.at<double>(j, i) = new_pixel;
+            dst.at<double>(j + 1, i)     = bound(dst.at<double>(j + 1, i)     + error * kErrorEast,     0.0, 1.0);
+            dst.at<double>(j - 1, i + 1) = bound(dst.at<double>(j - 1, i + 1) + error * kErrorSouthWest, 0.0, 1.0);
+            dst.at<double>(j,     i + 1) = bound(dst.at<double>(j,     i + 1) + error * kErrorSouth,     0.0, 1.0);
+            dst.at<double>(j + 1, i + 1) = bound(dst.at<double>(j + 1, i + 1) + error * kErrorSouthEast, 0.0, 1.0);
+        }
+    }
+}
 
-	std::string output_gcode = std::string("");
-	itr = std::find(argv, argv+argc, std::string("--output_gcode"));
-	output_gcode = itr != argv+argc && ++itr != argv+argc ? std::string(*itr): "";
-	std::cout << "-- output_gcode "<< output_gcode <<std::endl;
-	
-    Mat img = imread(image_path, IMREAD_COLOR);
-	std::cout << "( "<< img.rows << ", " << img.cols << " )" << std::endl;
-    if(img.empty())
-    {
-        std::cout << "Could not read the image: " << image_path << std::endl;
+// Minimal flag parser: keeps the original CLI contract (the image path is the
+// last argument) while removing the repetitive std::find blocks.
+struct Options {
+    std::string image_path;
+    double beam_width = 0.0;
+    double x0 = 0.0;
+    double y0 = 0.0;
+    double width_mm = 0.0;
+    double height_mm = 0.0;
+    std::string preview_path;
+    std::string gcode_path;
+};
+
+Options parse_command_line(int argc, char* argv[]) {
+    Options opts;
+
+    auto flag_value = [&](const std::string& flag) -> std::string {
+        auto it = std::find(argv, argv + argc, flag);
+        if (it != argv + argc && ++it != argv + argc) {
+            return std::string(*it);
+        }
+        return std::string();
+    };
+    auto as_double = [&](const std::string& flag, double fallback) {
+        std::string value = flag_value(flag);
+        return value.empty() ? fallback : std::stod(value);
+    };
+
+    opts.beam_width   = as_double("--beamWidth", 0.0);
+    opts.x0           = as_double("--x0", 0.0);
+    opts.y0           = as_double("--y0", 0.0);
+    opts.width_mm     = as_double("--wf", 0.0);
+    opts.height_mm    = as_double("--hf", 0.0);
+    opts.preview_path = flag_value("--output_file_img");
+    opts.gcode_path   = flag_value("--output_gcode");
+    opts.image_path   = argv[argc - 1];
+
+    std::cout << "-- beamWidth "        << opts.beam_width  << "\n"
+              << "-- x0 "               << opts.x0          << "\n"
+              << "-- y0 "               << opts.y0          << "\n"
+              << "-- wf "               << opts.width_mm    << "\n"
+              << "-- hf "               << opts.height_mm   << "\n"
+              << "-- output_file_img "  << opts.preview_path << "\n"
+              << "-- output_gcode "     << opts.gcode_path   << "\n";
+    return opts;
+}
+
+}  // namespace
+
+int main(int argc, char* argv[]) {
+    const Options opts = parse_command_line(argc, argv);
+
+    Mat img = imread(samples::findFile(opts.image_path), IMREAD_COLOR);
+    std::cout << "(" << img.rows << ", " << img.cols << ") | channels: "
+              << img.channels() << " | type: " << img.type() << std::endl;
+    if (img.empty()) {
+        std::cout << "Could not read the image: " << opts.image_path << std::endl;
         return 1;
     }
-	int k;
+
     imshow("Display window", img);
-    k = waitKey(0); // Wait for a keystroke in the window
+    waitKey(0);
 
-	std::cout << "img.cols: " << img.cols<< std::endl;
-	std::cout << "img.rows: " << img.rows<< std::endl;
-	std::cout << "img.chn: " << img.channels()<< std::endl;
-	std::cout << "img.type: " << img.type()<< std::endl;
+    // Scale the image so it fits inside the requested work area while keeping
+    // its aspect ratio.
+    const double rowf = opts.height_mm / opts.beam_width;
+    const double colf = opts.width_mm / opts.beam_width;
 
-	double rowf= hf/beamWidth;
-	double colf = wf/beamWidth;
+    const double init_ratio = static_cast<double>(img.rows) / img.cols;
+    const double final_ratio = rowf / colf;
+    const bool is_x_scaling = final_ratio > init_ratio;
+    const double scale_rate = is_x_scaling ? colf / img.cols : rowf / img.rows;
 
-	std::cout << "rowf :"<< rowf << " colf : " << colf << std::endl;
-	std::cout << "img.rows :"<< img.rows << " img.cols : " << img.cols << std::endl;
-
-	//get direction of resize
-	double init_ratio = (double)img.rows/img.cols;	
-	double final_ratio =rowf/colf;	
-	std::cout << "init_ratio :"<< init_ratio << " final_ratio : " << final_ratio << std::endl;
-	bool is_x_scaling = false;
-	if(final_ratio > init_ratio){
-		is_x_scaling = true;
-	}
-	std::cout << "is_x_scaling: " << is_x_scaling << std::endl;
-	double scale_rate = is_x_scaling ? colf/img.cols : rowf/img.rows ;
-	std::cout << "scale_rate : " << scale_rate << std::endl;
-
-	// resize image
-	Mat scaled_img = img.clone();
-	std::cout << "mat type: "<< img.type()<< std::endl;
-	Size s;
-	s.height = img.rows*scale_rate;
-	s.width =  img.cols*scale_rate ;
-	cv::resize(img, scaled_img, s, INTER_CUBIC);
+    Size target_size;
+    target_size.width = static_cast<int>(img.cols * scale_rate);
+    target_size.height = static_cast<int>(img.rows * scale_rate);
+    Mat scaled_img;
+    cv::resize(img, scaled_img, target_size, INTER_CUBIC);
 
     imshow("Display window", scaled_img);
-    k = waitKey(0); // Wait for a keystroke in the window
-	//return 0;
+    waitKey(0);
 
-	Mat black_white_img = scaled_img.clone();		
-	cvtColor(scaled_img, black_white_img, COLOR_BGR2GRAY);
+    // Grayscale, normalized to [0, 1] for the dithering pass.
+    Mat grayscale_img;
+    cvtColor(scaled_img, grayscale_img, COLOR_BGR2GRAY);
 
-    imshow("Display window", black_white_img);
-    k = waitKey(0); // Wait for a keystroke in the window
+    imshow("Display window", grayscale_img);
+    waitKey(0);
 
-	Mat src = Mat(black_white_img.size(), CV_64FC1);
-	src = black_white_img.clone();
-	black_white_img.convertTo(src, CV_64FC1, 1.0/256.0, 0.0);
-	Mat dst = Mat(src.size(), CV_64FC1);
-	dst = src.clone();
+    Mat src;
+    grayscale_img.convertTo(src, CV_64FC1, 1.0 / 256.0, 0.0);
+    Mat dst = src.clone();
 
-	dithering(&src, &dst);
-	Mat dithered_img = Mat(dst.size(), CV_8U);
-	dst.convertTo(dithered_img, CV_8UC1, 255,0);
-	//dithered_img = dst.clone();
+    dithering(src, dst);
+
+    Mat dithered_img;
+    dst.convertTo(dithered_img, CV_8UC1, 255, 0);
     imshow("Display window", dithered_img);
-    k = waitKey(0); // Wait for a keystroke in the window
+    waitKey(0);
 
+    // Flip vertically so the engraved pattern matches the machine's origin.
+    Mat flipped_img;
+    flip(dithered_img, flipped_img, 0);
 
-	Mat flipped_img = Mat(dst.size(), CV_8U);
-	flip(dithered_img, flipped_img,0);
-
-    if(output_file_img.compare("") != 0){
-			imwrite(output_file_img, flipped_img );
-	}	
+    if (!opts.preview_path.empty()) {
+        imwrite(opts.preview_path, flipped_img);
+    }
 
     imshow("Display window", flipped_img);
-    k = waitKey(0); // Wait for a keystroke in the window
+    waitKey(0);
 
-	std::string head = std::string(
-		"G90     ;Absolute programming\n\n"
-		"G21     ;Programming in millimeters (mm)\n"
-		"G0 X50 Y10 Z100\n"
-		"G92 X0 Y0 Z0\n"
-		"M03 S1 ;Activate laser and set power to 0 (CUSTOM)\n"
-		"\n"
-		"; START perimeter strategy\n"
-		"G01 F400.0\n"
-		"; 5 strips 0.1\n"
-		"M107\n"
-		);
+    const std::string head = std::string(
+        "G90     ;Absolute programming\n\n"
+        "G21     ;Programming in millimeters (mm)\n"
+        "G0 X50 Y10 Z100\n"
+        "G92 X0 Y0 Z0\n"
+        "M03 S1 ;Activate laser and set power to 0 (CUSTOM)\n"
+        "\n"
+        "; START perimeter strategy\n"
+        "G01 F400.0\n"
+        "; 5 strips 0.1\n"
+        "M107\n");
 
-	std::string tail = std::string(
-		"G00 X0 Y0\n"
-		"M05 S0  ;Deactivate laser and set power to 0 (CUSTOM)\n"
-		"G0 X-55 Y-20 Z-100\n"
-		"G92 X0 Y0 Z0\n"
-		"M02 ;End of program\n"
-	);
+    const std::string tail = std::string(
+        "G00 X0 Y0\n"
+        "M05 S0  ;Deactivate laser and set power to 0 (CUSTOM)\n"
+        "G0 X-55 Y-20 Z-100\n"
+        "G92 X0 Y0 Z0\n"
+        "M02 ;End of program\n");
 
-	std::ofstream gcode_stream (output_gcode);
-	if (gcode_stream.is_open())
-	{
-		gcode_stream << head;
-		gcode_stream << std::fixed << std::setprecision(2);
+    std::ofstream gcode_stream(opts.gcode_path);
+    if (!gcode_stream.is_open()) {
+        std::cout << "Unable to open file: " << opts.gcode_path << std::endl;
+        return 1;
+    }
 
-		int startDelay = 65;
-		int endDelay = 80;
-		int velocity = 300;
-		for(int i = 0; i < flipped_img.cols; i++){
-			for( int j = 0; j < flipped_img.rows; j++){
-				if( flipped_img.at<uchar>(j,i) == 0 ){
-					// 1 px;
-					double x = (double)x0 + (double)i *beamWidth;
-					double y = y0 + (double)j *beamWidth;
-					gcode_stream<< "G00 X" <<x << " Y" << y<< " F3000.0\n";
-					gcode_stream << "M106 S255 F3000.0\n";
-					gcode_stream << "G4 P"<< startDelay << "\n";
-					//gcode_stream << "M107\n";
-					gcode_stream << "M106 S10 F3000.0\n";
-					gcode_stream << "G4 P"<<endDelay<<"\n";
-						
-				}
-			}
-		}
+    gcode_stream << head;
+    gcode_stream << std::fixed << std::setprecision(2);
 
-		/*	
+    constexpr int kBurnDelayMs = 65;
+    constexpr int kCoolDownDelayMs = 80;
+    for (int i = 0; i < flipped_img.cols; i++) {
+        for (int j = 0; j < flipped_img.rows; j++) {
+            if (flipped_img.at<uchar>(j, i) != 0) {
+                continue;
+            }
+            const double x = opts.x0 + i * opts.beam_width;
+            const double y = opts.y0 + j * opts.beam_width;
+            gcode_stream << "G00 X" << x << " Y" << y << " F3000.0\n";
+            gcode_stream << "M106 S255 F3000.0\n";
+            gcode_stream << "G4 P" << kBurnDelayMs << "\n";
+            gcode_stream << "M106 S10 F3000.0\n";
+            gcode_stream << "G4 P" << kCoolDownDelayMs << "\n";
+        }
+    }
 
-		int boxl = 10;
-		// dotted
-		gcode_stream << "; dotted\n";
-		for(int i = 0; i < boxl/beamWidth; i++){
-			for(int j = 0; j < boxl/beamWidth; j++){
-				if( ( i%2 == 0 && (j+1) %2 == 0 ) || ((i+1)%2 == 0 && j%2 ==0)){	
-					double x = (double)x0 + (double)i *beamWidth;
-					double y = y0 + (double)j *beamWidth;
-					gcode_stream<< "G00 X" <<x << " Y" << y<< " F3000.0\n";
-					gcode_stream << "M106 S255 F3000.0\n";
-					gcode_stream << "G4 P"<< startDelay << "\n";
-					//gcode_stream << "M107\n";
-					gcode_stream << "M106 S10 F3000.0\n";
-					gcode_stream << "G4 P"<<endDelay<<"\n";
-				}
-			}
-		}
+    gcode_stream << "M107\n";
+    gcode_stream << tail;
+    gcode_stream.close();
 
-		y0 += boxl;
-
-		gcode_stream << "; dotted2\n";
-		for(int i = 0; i < boxl/beamWidth; i++){
-			for(int j = 0; j < boxl/beamWidth; j++){
-				if( !( i%2 == 0 && j %2 == 0 )){	
-					double x = (double)x0 + (double)i *beamWidth;
-					double y = y0 + (double)j *beamWidth;
-					gcode_stream<< "G00 X" <<x << " Y" << y<< " F3000.0\n";
-					gcode_stream << "M106 S255 F3000.0\n";
-					gcode_stream << "G4 P"<< startDelay << "\n";
-					//gcode_stream << "M107\n";
-					gcode_stream << "M106 S10 F3000.0\n";
-					gcode_stream << "G4 P"<<endDelay<<"\n";
-				}
-			}
-		}
-		
-		y0 += boxl;
-
-		gcode_stream << "; dottedfull\n";
-		for(int i = 0; i < boxl/beamWidth; i++){
-			for(int j = 0; j < boxl/beamWidth; j++){
-					double x = (double)x0 + (double)i *beamWidth;
-					double y = y0 + (double)j *beamWidth;
-					gcode_stream<< "G00 X" <<x << " Y" << y<< " F3000.0\n";
-					gcode_stream << "M106 S255 F3000.0\n";
-					gcode_stream << "G4 P"<< startDelay << "\n";
-					//gcode_stream << "M107\n";
-					gcode_stream << "M106 S10 F3000.0\n";
-					gcode_stream << "G4 P"<<endDelay<<"\n";
-			}
-		}
-
-		x0 += boxl;
-		gcode_stream << "; lines x\n";
-		for(int i = 0; i < boxl/beamWidth; i++){
-				if( i%2 == 0){	
-					double x = (double)x0 + (double)i *beamWidth;
-					double y = y0;
-					gcode_stream<< "G00 X" <<x << " Y" << y<< " F3000.0\n";
-					gcode_stream << "M106 S255 F3000.0\n";
-					gcode_stream << "G4 P"<< startDelay << "\n";
-					gcode_stream<< "G01 X" <<x << " Y" << (double)y+boxl<< " F"<<velocity<<"\n";
-					//gcode_stream << "M107\n";
-					gcode_stream << "M106 S10 F3000.0\n";
-					gcode_stream << "G4 P"<<endDelay<<"\n";
-				}
-		}
-
-		x0 += boxl;
-		gcode_stream << "; lines y\n";
-		for(int i = 0; i < boxl/beamWidth; i++){
-				if( i%2 == 0){	
-					double x = (double)x0 ;
-					double y = y0+ (double)i *beamWidth;
-					gcode_stream<< "G00 X" <<x << " Y" << y<< " F3000.0\n";
-					gcode_stream << "M106 S255 F3000.0\n";
-					gcode_stream << "G4 P"<<endDelay<<"\n";
-					gcode_stream << "G4 P"<< startDelay << "\n";
-					gcode_stream<< "G01 X" <<x +boxl<< " Y" << y<< " F"<<velocity<<"\n";
-					//gcode_stream << "M107\n";
-					gcode_stream << "M106 S10 F3000.0\n";
-					gcode_stream << "G4 P"<<endDelay<<"\n";
-
-				}
-		}
-
-		x0 += boxl;
-		gcode_stream << "; lines overlapped \n";
-		for(int i = 0; i < boxl/beamWidth; i++){
-				if( i%2 == 0){	
-					double x = (double)x0 ;
-					double y = y0+ (double)i *beamWidth;
-					gcode_stream<< "G00 X" <<x << " Y" << y<< " F3000.0\n";
-					gcode_stream << "M106 S255 F3000.0\n";
-					gcode_stream << "G4 P"<< startDelay << "\n";
-					gcode_stream<< "G01 X" <<x +boxl<< " Y" << y<< " F"<<velocity<<"\n";
-					//gcode_stream << "M107\n";
-					gcode_stream << "M106 S10 F3000.0\n";
-					gcode_stream << "G4 P"<<endDelay<<"\n";
-				}
-		}
-		for(int i = 0; i < boxl/beamWidth; i++){
-				if( i%2 == 0){	
-					double x = (double)x0 + (double)i *beamWidth;
-					double y = y0;
-					gcode_stream<< "G00 X" <<x << " Y" << y<< " F3000.0\n";
-					gcode_stream << "M106 S255 F3000.0\n";
-					gcode_stream << "G4 P"<< startDelay << "\n";
-					gcode_stream<< "G01 X" <<x << " Y" << (double)y+boxl<< " F"<<velocity<<"\n";
-					//gcode_stream << "M107\n";
-					gcode_stream << "M106 S10 F3000.0\n";
-					gcode_stream << "G4 P"<<endDelay<<"\n";
-				}
-		}
-		//y0 += boxl;
-		//x0 -= 3*boxl;
-
-		x0 += boxl;
-		gcode_stream << "; lines dotted x\n";
-		
-		//TODO change
-		for(int i = 0; i < boxl/beamWidth; i++){
-			for(int j = 0; j < boxl/beamWidth; j++){
-				if( (i)%2 == 0 && ((j+i)%3 ==0 || (j+1)%3 ==1) ){	
-
-					double x = (double)x0 + (double)i *beamWidth;
-					double y = y0;
-					gcode_stream<< "G00 X" <<x << " Y" << (double)y+(j)*beamWidth<< " F3000.0\n";
-					gcode_stream << "M106 S255 F3000.0\n";
-					gcode_stream << "G4 P"<< startDelay << "\n";
-					gcode_stream<< "G01 X" <<x << " Y" << (double)y+(j+1)*beamWidth<< " F"<<velocity<<"\n";
-					//gcode_stream << "M107\n";
-					gcode_stream << "M106 S10 F3000.0\n";
-					gcode_stream << "G4 P"<<endDelay<<"\n";
-				}
-			}
-		}
-
-		x0 += boxl;
-		gcode_stream << "; lines dotted y\n";
-		/TODO CHANGE
-		for(int i = 0; i < boxl/beamWidth; i++){
-			for(int j = 0; j < boxl/beamWidth; j++){
-				if( j%2 == 0 && ( (i+j)%3 ==0 || (i+j)%3 ==1 ) ){
-
-					double x = (double)x0;
-					double y = y0 + j* beamWidth;
-					gcode_stream<< "G00 X" <<x +(i)*beamWidth << " Y" << y<< " F3000.0\n";
-					gcode_stream << "M106 S255 F3000.0\n";
-					gcode_stream << "G4 P"<< startDelay << "\n";
-					gcode_stream<< "G01 X" <<x +(i+1)*beamWidth<< " Y" << (double)y<< " F"<<velocity<<"\n";
-					//gcode_stream << "M107\n";
-					gcode_stream << "M106 S10 F3000.0\n";
-					gcode_stream << "G4 P"<<endDelay<<"\n";
-				}
-			}
-		}
-		x0 += boxl;
-		gcode_stream << "; lines dotted y - 5\n";
-		for(int i = 0; i < boxl/beamWidth; i++){
-			for(int j = 0; j < boxl/beamWidth; j++){
-				if( (i)%2 == 0 && (j+i)%5 ==0 ){	
-
-					double x = (double)x0 + (double)i *beamWidth;
-					double y = y0;
-					gcode_stream<< "G00 X" <<x << " Y" << (double)y+(j)*beamWidth<< " F3000.0\n";
-					gcode_stream << "M106 S255 F3000.0\n";
-					gcode_stream << "G4 P"<< startDelay << "\n";
-					gcode_stream<< "G01 X" <<x << " Y" << (double)y+(j+4)*beamWidth<< " F"<<velocity<<"\n";
-					//gcode_stream << "M107\n";
-					gcode_stream << "M106 S10 F3000.0\n";
-					gcode_stream << "G4 P"<<endDelay<<"\n";
-				}
-			}
-		}
-
-		x0 += boxl;
-		gcode_stream << "; lines dotted y - 5\n";
-
-		for(int i = 0; i < boxl/beamWidth; i++){
-			for(int j = 0; j < boxl/beamWidth; j++){
-				if( j%2 == 0 && (i+j)%5 ==0 ){	
-
-					double x = (double)x0;
-					double y = y0 + j* beamWidth;
-					gcode_stream<< "G00 X" <<x +(i)*beamWidth << " Y" << y<< " F3000.0\n";
-					gcode_stream << "M106 S255 F3000.0\n";
-					gcode_stream << "G4 P"<< startDelay << "\n";
-					gcode_stream<< "G01 X" <<x +(i+4)*beamWidth<< " Y" << (double)y<< " F"<<velocity<<"\n";
-					//gcode_stream << "M107\n";
-					gcode_stream << "M106 S10 F3000.0\n";
-					gcode_stream << "G4 P"<<endDelay<<"\n";
-				}
-			}
-		}
-
-		*/
-
-		gcode_stream << "M107\n";
-
-		gcode_stream << tail;
-		gcode_stream.close();
-	} else {
-		std::cout << "Unable to open file\n";
-	}
-	return 0;
-}
-
-void dithering(Mat* _src, Mat* _dst){
-
-	Mat src = *_src;
-	Mat dst = *_dst;
-	double w_e = 7.0/16;
-	double w_sw = 3.0/16;
-	double w_s = 5.0/16;
-	double w_se = 1.0/16;
-
-
-	//printM(src);
-	for( int i = 1; i < dst.cols-1; i++){
-		for(int j = 1; j < dst.rows-1; j++){
-
-			//printM(dst);
-			//std::cout << "--" << std::endl;
-
-			double old_pixel = dst.at<double>(j,i);	
-			double new_pixel = old_pixel > 0.5 ? 1 : 0;
-
-			dst.at<double>(j,i) =  new_pixel ;
-			double error = (double) old_pixel - new_pixel;
-
-			//std::cout << "--0" << std::endl;
-			//printM(dst);
-			double update = (double)dst.at<double>(j+1,i) + (error * w_e);
-			dst.at<double>(j+1,i) = bound(update, 0, 1);
-			//std::cout << "--1" << std::endl;
-			//printM(dst);
-
-			update = dst.at<double>(j-1,i+1) + (error * w_sw);
-			dst.at<double>(j-1, i+1) = bound(update, 0, 1);
-			//std::cout << "--2" << std::endl;
-			//printM(dst);
-
-			update = dst.at<double>(j, i+1) +  (error * w_s);
-			dst.at<double>(j, i+1) = bound(update, 0, 1);
-			//std::cout << "--3" << std::endl;
-			//printM(dst);
-
-			update = dst.at<double>(j+1, i+1) + (error * w_se);
-			dst.at<double>(j+1, i+1) = bound(update, 0, 1);
-
-			//std::cout << "--4" << std::endl;
-			//printM(dst);
-		}
-	}
-	return;
-}
-void printM(Mat tmp){
-	for(int i = 0; i < tmp.cols; i++){
-		for( int j =0; j < tmp.rows; j++){
-			std::cout << (double)tmp.at<double>(j,i) << " ";
-		}
-		std::cout << std::endl; 
-	}
-}
-
-double bound(double x, double from, double to){
-	//return x;
-	return x < from ? from : (x > to? to: x);
+    return 0;
 }
